@@ -1,86 +1,73 @@
 # Windows Update Service Dependency Checker
 
-A PowerShell diagnostic script that audits the status and startup type of Windows Update and its dependency services across a fleet of remote Windows hosts. Results export to a timestamped CSV for cross-machine comparison.
+## Overview
+A PowerShell diagnostic script that audits the status and startup type of Windows Update and its core dependency services across a fleet of remote Windows hosts. Results export to a timestamped CSV for cross-machine comparison, enabling rapid identification of which service is broken and on which machines.
 
-![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue?logo=powershell) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?logo=windows) ![License](https://img.shields.io/badge/License-MIT-green)
+## Problem It Solves
+When Windows Update fails across multiple endpoints simultaneously, the root cause is rarely the update service itself — it's almost always a dependency (BITS, CryptSvc, RPC) that is stopped, disabled, or in a failed state. Checking each machine manually through the GUI or even `services.msc` remotely is not scalable. This script was used to diagnose a fleet-wide update failure: running it revealed that **BITS was stopped or disabled on all affected machines**, enabling targeted remediation instead of a trial-and-error approach.
 
-## Background
+## Key Features
+- Audits 5 Windows Update dependency services per host: `wuauserv`, `BITS`, `RpcSS`, `RpcEptMapper`, `CryptSvc`
+- Accepts a custom service list via parameter for ad-hoc audits
+- Remote query via CIM (WMI) — no WinRM required
+- Timestamped output CSV — reruns never overwrite prior results
+- Graceful error handling per host — one unreachable machine does not abort the batch
+- Parameterized input/output paths — portable across environments
 
-When a large number of managed endpoints began failing Windows Update, this script was used to systematically identify the root cause. Running it against affected machines revealed that **BITS (Background Intelligent Transfer Service)** was either stopped or in a failed state on the problem hosts — preventing Windows Update from downloading patches. The CSV output allowed quick cross-fleet comparison to confirm the pattern before targeting remediation.
+## Technologies Used
+- PowerShell 5.1+
+- `Get-CimInstance Win32_Service` (WMI/DCOM transport)
+- CSV input/output via `Import-Csv` / `Export-Csv`
 
-## Services Checked
+## Example Use Case
+A wave of SCCM compliance alerts shows Windows Update failing on 40+ workstations in a remote office. Running this script against the affected machine list returns a CSV showing BITS is `Stopped / Disabled` on every affected host. A follow-up SCCM script re-enables and starts BITS fleet-wide — update failures stop within the hour, with no need to touch each machine individually.
 
-| Service Name | Display Name | Role in Windows Update |
-|---|---|---|
-| `wuauserv` | Windows Update | Core update orchestration |
-| `BITS` | Background Intelligent Transfer Service | Downloads update packages in the background |
-| `RpcSS` | Remote Procedure Call | Required by virtually all Windows services |
-| `RpcEptMapper` | RPC Endpoint Mapper | Routes RPC traffic to the correct endpoint |
-| `CryptSvc` | Cryptographic Services | Validates update package signatures |
-
-## Requirements
-
-| Requirement | Detail |
-|-------------|--------|
-| PowerShell | 5.1 or later |
-| Network | WMI/DCOM access to each target (TCP 135 + dynamic RPC), or WinRM |
-| Permissions | Permission to query services on each remote host |
-| Input | CSV file with a column named `FQDN` |
-
-## Usage
+## How to Run
 
 ```powershell
-# Basic — reads .\computers.csv, writes a timestamped CSV to the current directory
+# Default — reads .\computers.csv, writes timestamped CSV to current directory
 .\Get-WUServiceStatus.ps1
 
-# Specify input file
+# Specify input CSV
 .\Get-WUServiceStatus.ps1 -ComputerListCsv "C:\Lists\servers.csv"
 
 # Specify both input and output
-.\Get-WUServiceStatus.ps1 -ComputerListCsv ".\servers.csv" -OutputCsv "C:\Reports\audit.csv"
+.\Get-WUServiceStatus.ps1 -ComputerListCsv ".\servers.csv" -OutputCsv "C:\Reports\wu_audit.csv"
 
-# Check a custom set of services
+# Check a custom service list
 .\Get-WUServiceStatus.ps1 -Services "wuauserv","BITS","Winmgmt"
 ```
 
-### Input CSV format
+**Input CSV format** (`computers.csv` template included in repo):
 
 ```csv
 FQDN
 workstation01.corp.local
-workstation02.corp.local
 server01.corp.local
 ```
 
-### Example Output (console)
+## Example Output
 
+**Console:**
 ```
-Computer                  Service      DisplayName                              Status  StartupType
---------                  -------      -----------                              ------  -----------
-workstation01.corp.local  wuauserv     Windows Update                          Running Manual
-workstation01.corp.local  BITS         Background Intelligent Transfer Service  Stopped Disabled
-workstation01.corp.local  RpcSS        Remote Procedure Call                   Running Automatic
-workstation02.corp.local  wuauserv     Windows Update                          Running Manual
-workstation02.corp.local  BITS         Background Intelligent Transfer Service  Running Manual
-...
+Computer                  Service  DisplayName                              Status   StartupType
+--------                  -------  -----------                              ------   -----------
+workstation01.corp.local  wuauserv Windows Update                          Running  Manual
+workstation01.corp.local  BITS     Background Intelligent Transfer Service  Stopped  Disabled
+workstation01.corp.local  CryptSvc Cryptographic Services                  Running  Automatic
 
 Results saved to: .\WUServiceStatus_20260621_143022.csv
-10 records written (2 machine(s) x 5 service(s)).
+15 records written (3 machine(s) x 5 service(s)).
 ```
 
-## Bugs Fixed from Original Version
+## Security Notes
+- Requires **local administrator rights** on each target host for WMI service queries
+- Uses WMI/DCOM (TCP 135 + dynamic RPC) — ensure firewall rules allow this on the target network segment
+- Read-only — does not start, stop, or modify any services
+- Authorized use only — run only against systems you are authorized to administer
 
-| # | Issue | Fix |
-|---|-------|-----|
-| 1 | `Get-WmiObject` is deprecated since PS 3.0 | Replaced with `Get-CimInstance` |
-| 2 | WMI call lacked `-ErrorAction Stop` — null `.StartMode` would throw uncaught | Added `-ErrorAction Stop`; added null guard on CIM result |
-| 3 | `$results += [PSCustomObject]` in a loop causes O(n²) array copies | Replaced with `[System.Collections.Generic.List]` |
-| 4 | Hardcoded CSV input/output paths | Converted to `-ComputerListCsv` and `-OutputCsv` parameters |
-| 5 | No check for missing input file | Added `Test-Path` guard with a clear error message |
-| 6 | Catch block didn't distinguish "not found" from "host unreachable" | Split into typed catch blocks: `ServiceCommandException` vs general |
-| 7 | Reruns silently overwrite the output CSV | Timestamp appended to output filename automatically |
-| 8 | Missing `wuauserv` and `CryptSvc` from service list | Added both — they are direct Windows Update dependencies |
-
-## License
-
-MIT — see [LICENSE](LICENSE) for details.
+## Lessons Learned
+- `Get-WmiObject` is deprecated and should be replaced with `Get-CimInstance` — it is faster, supports WSMan transport, and handles null results more predictably
+- Building a `List<T>` instead of using `+=` on an array in a loop eliminates O(n²) memory copying, which becomes significant at 500+ machine × 5 service rows
+- Typed catch blocks (`ServiceCommandException` vs general `Exception`) provide meaningful error messages instead of a generic "the RPC server is unavailable" swallowing the real cause
+- Including `StartupType` alongside `Status` is critical — a service set to `Disabled` will return `Stopped`, but the fix is different: you must re-enable it, not just start it
